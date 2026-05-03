@@ -80,15 +80,19 @@ class OpenWearablesModule : Module() {
     }
 
     private fun registerPermissionLauncher(activity: Activity) {
-        // Only register if the activity is a ComponentActivity (required for ActivityResultLauncher)
         if (activity is androidx.activity.ComponentActivity) {
-            val contract = PermissionController.createRequestPermissionResultContract()
-            permissionLauncher = activity.registerForActivityResult(contract) { granted ->
+            // Unregister previous launcher if any
+            permissionLauncher?.unregister()
+            // 3-param registry.register() has NO lifecycle restrictions — safe to call at any state
+            permissionLauncher = activity.activityResultRegistry.register(
+                "ow_health_permissions",
+                PermissionController.createRequestPermissionResultContract()
+            ) { granted ->
                 handlePermissionResult(granted)
             }
-            log("$MODULE_LOG_TAG Permission launcher registered")
+            log("$MODULE_LOG_TAG Permission launcher registered via registry")
         } else {
-            log("$MODULE_LOG_TAG Activity is not ComponentActivity, using fallback permission flow")
+            log("$MODULE_LOG_TAG Activity is not ComponentActivity, cannot register launcher")
         }
     }
 
@@ -140,6 +144,7 @@ class OpenWearablesModule : Module() {
         }
 
         OnActivityDestroys {
+            permissionLauncher?.unregister()
             permissionLauncher = null
             pendingPermissionPromise?.reject(
                 CodedException("ACTIVITY_DESTROYED", "Activity was destroyed while awaiting permissions", null)

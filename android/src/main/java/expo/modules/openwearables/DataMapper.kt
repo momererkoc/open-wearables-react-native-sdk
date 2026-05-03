@@ -570,7 +570,7 @@ object DataMapper {
 
         ExerciseSessionRecord.EXERCISE_TYPE_GUIDED_BREATHING -> "guided_breathing"
 
-        ExerciseSessionRecord.EXERCISE_TYPE_CROSS_COUNTRY_SKIING -> "cross_country_skiing"
+        // EXERCISE_TYPE_CROSS_COUNTRY_SKIING not available in HC 1.1.0-rc01
 
         ExerciseSessionRecord.EXERCISE_TYPE_ICE_SKATING -> "ice_skating"
 
@@ -582,7 +582,7 @@ object DataMapper {
 
         ExerciseSessionRecord.EXERCISE_TYPE_PADDLING -> "paddling"
 
-        ExerciseSessionRecord.EXERCISE_TYPE_PARA_GLIDING -> "paragliding"
+        // EXERCISE_TYPE_PARA_GLIDING not available in HC 1.1.0-rc01
 
         ExerciseSessionRecord.EXERCISE_TYPE_GYMNASTICS -> "gymnastics"
 
@@ -595,7 +595,7 @@ object DataMapper {
 
     private fun deviceSource(device: Device?): SourceInfo {
         return SourceInfo(
-            deviceId = device?.identifier ?: "unknown",
+            deviceId = device?.model ?: "unknown",
             deviceName = device?.model ?: "unknown",
             deviceManufacturer = device?.manufacturer ?: "unknown",
             deviceModel = device?.model ?: "unknown",

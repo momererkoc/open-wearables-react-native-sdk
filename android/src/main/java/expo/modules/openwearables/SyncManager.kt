@@ -86,40 +86,24 @@ class SyncManager(
             request
         )
 
+        prefs.edit().putBoolean("bg_sync_scheduled", true).apply()
         onLog("[SyncManager] Background sync started with interval=${interval}m, daysBack=$days")
         true
     }
 
     fun stopBackgroundSync() {
         WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
+        prefs.edit().putBoolean("bg_sync_scheduled", false).apply()
         onLog("[SyncManager] Background sync stopped")
     }
 
-    fun isSyncActive(): Boolean {
-        val workInfos = WorkManager.getInstance(context)
-            .getWorkInfosForUniqueWork(WORK_NAME)
-            .get()
-        return workInfos.any { info ->
-            info.state == WorkInfo.State.RUNNING ||
-            info.state == WorkInfo.State.ENQUEUED ||
-            info.state == WorkInfo.State.BLOCKED
-        }
-    }
+    fun isSyncActive(): Boolean = isSyncing.get()
 
     fun getSyncStatus(): Map<String, Any?> {
-        val workInfos = try {
-            WorkManager.getInstance(context)
-                .getWorkInfosForUniqueWork(WORK_NAME)
-                .get()
-        } catch (e: Exception) {
-            emptyList()
-        }
-
-        val state = workInfos.firstOrNull()?.state?.name ?: "NOT_SCHEDULED"
-
+        val bgScheduled = prefs.getBoolean("bg_sync_scheduled", false)
         return mapOf(
-            "isActive" to isSyncActive(),
-            "workerState" to state,
+            "isActive" to isSyncing.get(),
+            "workerState" to if (bgScheduled) "ENQUEUED" else "NOT_SCHEDULED",
             "lastSyncSuccess" to prefs.getString(KEY_LAST_SYNC_SUCCESS, null),
             "lastSyncAttempt" to prefs.getString(KEY_LAST_SYNC_ATTEMPT, null),
             "lastSyncError" to prefs.getString(KEY_SYNC_ERROR, null),
