@@ -1,150 +1,343 @@
 package expo.modules.openwearables
 
+import android.app.Activity
+import androidx.activity.result.ActivityResultLauncher
+import androidx.health.connect.client.PermissionController
+import expo.modules.kotlin.Promise
+import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.functions.Coroutine
-import com.openwearables.health.sdk.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
-public class OpenWearablesModule : Module() {
-  public override fun definition() = ModuleDefinition {
-    Name("OpenWearablesHealthSDK")
+class OpenWearablesModule : Module() {
 
-    // MARK: - Callbacks (Events)
-    Events("onLog", "onAuthError")
+    companion object {
+        private const val HEALTH_CONNECT_PERM_REQUEST_CODE = 9421
+        private const val MODULE_LOG_TAG = "[OpenWearablesModule]"
+    }
 
-    // MARK: - Lifecycle
-    OnCreate {
-      OpenWearablesHealthSDK.initialize(appContext.reactContext!!)
-      
-      appContext.activityProvider?.currentActivity?.let { activity ->
-        OpenWearablesHealthSDK.getInstance().setActivity(activity)
-      }
+    private val moduleScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
-      OpenWearablesHealthSDK.getInstance().logListener = { message ->
-        sendEvent(
-          "onLog",
-          mapOf(
-            "message" to message
-          )
+    // Lazy-initialized managers — they need appContext which is available after OnCreate
+    private lateinit var authManager: AuthManager
+    private lateinit var apiClient: ApiClient
+    private lateinit var healthConnectManager: HealthConnectManager
+    private lateinit var syncManager: SyncManager
+
+    // Pending promise for the requestAuthorization flow
+    private var pendingPermissionPromise: Promise? = null
+    private var pendingPermissionTypes: List<String> = emptyList()
+
+    // Permission launcher registered via the activity; re-registered on each foreground
+    private var permissionLauncher: ActivityResultLauncher<Set<String>>? = null
+
+    // Log level (0=None, 1=Always, 2=Debug)
+    private var logLevel: Int = 1
+
+    // ---------------------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------------------
+
+    private fun log(message: String) {
+        if (logLevel > 0) {
+            sendEvent("onLog", mapOf("message" to message))
+        }
+    }
+
+    private fun authError(statusCode: Int, message: String) {
+        sendEvent("onAuthError", mapOf("statusCode" to statusCode, "message" to message))
+    }
+
+    private fun initManagers() {
+        val ctx = appContext.reactContext
+            ?: throw CodedException("NO_CONTEXT", "React context is not available", null)
+
+        authManager = AuthManager(ctx)
+
+        apiClient = ApiClient(
+            authManager = authManager,
+            onLog = { msg -> log(msg) },
+            onAuthError = { code, msg -> authError(code, msg) }
         )
-      }
 
-      OpenWearablesHealthSDK.getInstance().authErrorListener = { statusCode, message ->
-        sendEvent(
-          "onAuthError",
-          mapOf(
-            "statusCode" to statusCode,
-            "message" to message
-          )
+        healthConnectManager = HealthConnectManager(
+            context = ctx,
+            onLog = { msg -> log(msg) }
         )
-      }
+
+        syncManager = SyncManager(
+            context = ctx,
+            authManager = authManager,
+            healthConnectManager = healthConnectManager,
+            apiClient = apiClient,
+            onLog = { msg -> log(msg) },
+            onAuthError = { code, msg -> authError(code, msg) }
+        )
     }
 
-    OnActivityEntersForeground {
-      appContext.activityProvider?.currentActivity?.let { activity ->
-        OpenWearablesHealthSDK.getInstance().setActivity(activity)
-      }
-
-      OpenWearablesHealthSDK.getInstance().onForeground()
+    private fun registerPermissionLauncher(activity: Activity) {
+        // Only register if the activity is a ComponentActivity (required for ActivityResultLauncher)
+        if (activity is androidx.activity.ComponentActivity) {
+            val contract = PermissionController.createRequestPermissionResultContract()
+            permissionLauncher = activity.registerForActivityResult(contract) { granted ->
+                handlePermissionResult(granted)
+            }
+            log("$MODULE_LOG_TAG Permission launcher registered")
+        } else {
+            log("$MODULE_LOG_TAG Activity is not ComponentActivity, using fallback permission flow")
+        }
     }
 
-    OnActivityEntersBackground {
-      OpenWearablesHealthSDK.getInstance().onBackground()
+    private fun handlePermissionResult(granted: Set<String>) {
+        val promise = pendingPermissionPromise ?: return
+        pendingPermissionPromise = null
+
+        val required = healthConnectManager.buildPermissions(pendingPermissionTypes)
+        val allGranted = granted.containsAll(required)
+
+        log("$MODULE_LOG_TAG Permission result: granted=${granted.size}/${required.size}, allGranted=$allGranted")
+        promise.resolve(allGranted)
     }
 
-    OnActivityDestroys {
-      OpenWearablesHealthSDK.getInstance().unregisterPermissionLauncher()
-    }
+    // ---------------------------------------------------------------------------
+    // Module Definition
+    // ---------------------------------------------------------------------------
 
-    // MARK: - Configure
-    Function("configure") { host: String, customSyncURL: String? ->
-      OpenWearablesHealthSDK.getInstance().configure(host, customSyncURL)
-    }
+    override fun definition() = ModuleDefinition {
 
-    // MARK: - Auth
-    AsyncFunction("signIn") Coroutine { userId: String, accessToken: String?, refreshToken: String?, apiKey: String? ->
-      OpenWearablesHealthSDK.getInstance().signIn(
-        userId,
-        accessToken,
-        refreshToken,
-        apiKey
-      )
-    }
+        Name("OpenWearablesHealthSDK")
 
-    AsyncFunction("signOut") Coroutine { _: Unit? ->
-      OpenWearablesHealthSDK.getInstance().signOut()
-    }
+        Events("onLog", "onAuthError")
 
-    Function("updateTokens") { accessToken: String, refreshToken: String ->
-      OpenWearablesHealthSDK.getInstance().updateTokens(
-        accessToken,
-        refreshToken
-      )
-    }
+        // -----------------------------------------------------------------------
+        // Lifecycle
+        // -----------------------------------------------------------------------
 
-    Function("restoreSession") {
-      OpenWearablesHealthSDK.getInstance().restoreSession()
-    }
+        OnCreate {
+            initManagers()
+            log("$MODULE_LOG_TAG Module created")
 
-    Function("isSessionValid") {
-      OpenWearablesHealthSDK.getInstance().isSessionValid()
-    }
+            appContext.activityProvider?.currentActivity?.let { activity ->
+                registerPermissionLauncher(activity)
+            }
+        }
 
-    // MARK: - Authorization
-    AsyncFunction("requestAuthorization") Coroutine { types: List<String> ->
-      return@Coroutine OpenWearablesHealthSDK.getInstance().requestAuthorization(types)
-    }
+        OnActivityEntersForeground {
+            appContext.activityProvider?.currentActivity?.let { activity ->
+                // Re-register the launcher in case the activity was recreated
+                if (permissionLauncher == null) {
+                    registerPermissionLauncher(activity)
+                }
+            }
+        }
 
-    // MARK: - Sync
-    Function("setSyncInterval") { minutes: Long ->
-      OpenWearablesHealthSDK.getInstance().setSyncInterval(minutes)
-    }
+        OnActivityEntersBackground {
+            // Nothing specific to do on background
+        }
 
-    AsyncFunction("startBackgroundSync") Coroutine { syncDaysBack: Int? ->
-      return@Coroutine OpenWearablesHealthSDK.getInstance().startBackgroundSync(syncDaysBack)
-    }
+        OnActivityDestroys {
+            permissionLauncher = null
+            pendingPermissionPromise?.reject(
+                CodedException("ACTIVITY_DESTROYED", "Activity was destroyed while awaiting permissions", null)
+            )
+            pendingPermissionPromise = null
+        }
 
-    AsyncFunction("stopBackgroundSync") Coroutine { _: Unit? ->
-      OpenWearablesHealthSDK.getInstance().stopBackgroundSync()
-    }
+        // -----------------------------------------------------------------------
+        // Configure
+        // -----------------------------------------------------------------------
 
-    AsyncFunction("syncNow") Coroutine { _: Unit? ->
-      OpenWearablesHealthSDK.getInstance().syncNow()
-    }
+        Function("configure") { host: String, customSyncURL: String? ->
+            // Persist the host and optional custom sync URL by updating existing credentials
+            val existing = authManager.getCredentials()
+            if (existing != null) {
+                authManager.saveCredentials(
+                    userId = existing.userId,
+                    accessToken = existing.accessToken,
+                    refreshToken = existing.refreshToken,
+                    apiKey = existing.apiKey,
+                    host = host,
+                    customSyncURL = customSyncURL
+                )
+            } else {
+                // Store only configuration fields until signIn is called
+                authManager.saveCredentials(
+                    userId = "",
+                    accessToken = null,
+                    refreshToken = null,
+                    apiKey = null,
+                    host = host,
+                    customSyncURL = customSyncURL
+                )
+            }
+            log("$MODULE_LOG_TAG Configured with host=$host, customSyncURL=$customSyncURL")
+        }
 
-    AsyncFunction("resumeSync") Coroutine { _: Unit? ->
-      OpenWearablesHealthSDK.getInstance().resumeSync()
-      return@Coroutine true
-    }
+        // -----------------------------------------------------------------------
+        // Auth
+        // -----------------------------------------------------------------------
 
-    Function("isSyncActive") {
-      OpenWearablesHealthSDK.getInstance().isSyncActive()
-    }
+        AsyncFunction("signIn") Coroutine { userId: String, accessToken: String?, refreshToken: String?, apiKey: String? ->
+            val creds = authManager.getCredentials()
+            val host = creds?.host?.takeIf { it.isNotBlank() } ?: ""
+            val customSyncURL = creds?.customSyncURL
 
-    Function("getSyncStatus") {
-      OpenWearablesHealthSDK.getInstance().getSyncStatus()
-    }
+            authManager.saveCredentials(
+                userId = userId,
+                accessToken = accessToken,
+                refreshToken = refreshToken,
+                apiKey = apiKey,
+                host = host,
+                customSyncURL = customSyncURL
+            )
+            log("$MODULE_LOG_TAG Signed in userId=$userId")
+        }
 
-    Function("resetAnchors") {
-      OpenWearablesHealthSDK.getInstance().resetAnchors()
-    }
+        AsyncFunction("signOut") Coroutine { _: Unit? ->
+            syncManager.stopBackgroundSync()
+            authManager.clearCredentials()
+            log("$MODULE_LOG_TAG Signed out")
+        }
 
-    Function("getStoredCredentials") {
-      OpenWearablesHealthSDK.getInstance().getStoredCredentials()
-    }
+        Function("updateTokens") { accessToken: String, refreshToken: String ->
+            authManager.updateTokens(accessToken, refreshToken)
+            log("$MODULE_LOG_TAG Tokens updated")
+        }
 
-    // MARK: - Providers
-    Function("getAvailableProviders") {
-      OpenWearablesHealthSDK.getInstance().getAvailableProviders()
-    }
+        Function("restoreSession") {
+            authManager.restoreSession()
+        }
 
-    Function("setProvider") { providerId: String ->
-      OpenWearablesHealthSDK.getInstance().setProvider(providerId)
-    }
-    
-    // MARK: - Logs (not implemented in Android SDK)
-    Function("setLogLevel") {  }
+        Function("isSessionValid") {
+            authManager.isSessionValid()
+        }
 
-    Function("getLogLevel") {  }
-  }
+        // -----------------------------------------------------------------------
+        // Authorization
+        // -----------------------------------------------------------------------
+
+        AsyncFunction("requestAuthorization") { types: List<String>, promise: Promise ->
+            moduleScope.launch {
+                if (!healthConnectManager.checkAvailability()) {
+                    log("$MODULE_LOG_TAG Health Connect not available")
+                    promise.resolve(false)
+                    return@launch
+                }
+
+                // Check if all permissions are already granted
+                val alreadyGranted = healthConnectManager.hasAllPermissions(types)
+                if (alreadyGranted) {
+                    log("$MODULE_LOG_TAG All permissions already granted")
+                    promise.resolve(true)
+                    return@launch
+                }
+
+                val launcher = permissionLauncher
+                if (launcher == null) {
+                    log("$MODULE_LOG_TAG No permission launcher available, attempting to register")
+                    val activity = appContext.activityProvider?.currentActivity
+                    if (activity != null) {
+                        registerPermissionLauncher(activity)
+                    }
+                    if (permissionLauncher == null) {
+                        promise.reject(
+                            CodedException(
+                                "NO_LAUNCHER",
+                                "Activity not available for permission request. Call requestAuthorization from a foreground context.",
+                                null
+                            )
+                        )
+                        return@launch
+                    }
+                }
+
+                pendingPermissionPromise = promise
+                pendingPermissionTypes = types
+                healthConnectManager.requestPermissions(types, permissionLauncher!!)
+                log("$MODULE_LOG_TAG Permission request launched for ${types.size} types")
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // Sync
+        // -----------------------------------------------------------------------
+
+        Function("setSyncInterval") { minutes: Long ->
+            syncManager.setSyncInterval(minutes)
+        }
+
+        AsyncFunction("startBackgroundSync") Coroutine { syncDaysBack: Int? ->
+            syncManager.startBackgroundSync(syncDaysBack)
+        }
+
+        AsyncFunction("stopBackgroundSync") Coroutine { _: Unit? ->
+            syncManager.stopBackgroundSync()
+        }
+
+        AsyncFunction("syncNow") Coroutine { _: Unit? ->
+            syncManager.syncNow()
+        }
+
+        AsyncFunction("resumeSync") Coroutine { _: Unit? ->
+            syncManager.resumeSync()
+        }
+
+        Function("isSyncActive") {
+            syncManager.isSyncActive()
+        }
+
+        Function("getSyncStatus") {
+            syncManager.getSyncStatus()
+        }
+
+        Function("resetAnchors") {
+            syncManager.resetAnchors()
+        }
+
+        Function("getStoredCredentials") {
+            authManager.getStoredCredentials()
+        }
+
+        // -----------------------------------------------------------------------
+        // Providers
+        // -----------------------------------------------------------------------
+
+        Function("getAvailableProviders") {
+            val isAvailable = healthConnectManager.checkAvailability()
+            listOf(
+                mapOf(
+                    "id" to "google",
+                    "displayName" to "Google Health Connect",
+                    "isAvailable" to isAvailable
+                )
+            )
+        }
+
+        Function("setProvider") { providerId: String ->
+            // Android only supports Health Connect ("google"); always returns true for it
+            if (providerId == "google") {
+                log("$MODULE_LOG_TAG Provider set to google (Health Connect)")
+                true
+            } else {
+                log("$MODULE_LOG_TAG Unknown provider: $providerId")
+                false
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // Logs
+        // -----------------------------------------------------------------------
+
+        Function("setLogLevel") { level: Int ->
+            logLevel = level
+        }
+
+        Function("getLogLevel") {
+            logLevel
+        }
+    }
 }

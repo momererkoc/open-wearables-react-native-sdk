@@ -2,276 +2,236 @@
 
 The official React Native SDK for the [Open Wearables](https://github.com/the-momentum/open-wearables) project.
 
-The SDK is built with the [Expo Module API](https://docs.expo.dev/modules/module-api/) enabling install the app in Expo Project as well as in React Native CLI projects.
-It is a wrapper for the native iOS and Android SDKs to allow React Native apps to collect and sync health data.
+Built with the [Expo Module API](https://docs.expo.dev/modules/module-api/). Works in both Expo and bare React Native projects.
+
+**This fork contains a fully self-contained implementation** — no external private native SDKs required. Android uses Health Connect directly; iOS uses HealthKit directly.
 
 ## Platform support
 
-| Platform | Status                                                                        |
-| -------- | ----------------------------------------------------------------------------- |
-| iOS      | Implemented (via `OpenWearablesHealthSDK` CocoaPod, requires iOS 15.1+)       |
-| Android  | Implemented (via Maven Local dependency `com.openwearables.health:sdk:0.6.0`) |
+| Platform | Status | Implementation |
+| -------- | ------ | -------------- |
+| iOS      | ✅ Implemented | HealthKit (native, no external SDK) |
+| Android  | ✅ Implemented | Health Connect (native, no external SDK) |
+
+## Requirements
+
+| Platform | Minimum version |
+| -------- | --------------- |
+| iOS      | 15.1+ |
+| Android  | API 28+ (Android 9+) with Health Connect |
+| React Native | 0.73+ |
+| Expo     | SDK 51+ |
 
 ## Installation
 
-Currently, the SDK is only available locally. You can install it using the following command from the project root folder:
+### From this repo (local)
 
 ```sh
-npm install
+# In your project root:
+npm install /path/to/open-wearables-react-native-sdk
 ```
-
-When we publish the package to npm, we will use the following command (not available yet):
-
-```sh
-npm install open-wearables
-```
-
-Then, depending if you are using Expo or React Native CLI, follow the instructions below:
 
 ### Expo
 
-Expo projects using the Expo Modules API automatically link native dependencies.
-
-After installing the package, simply run your project.
-
 ```sh
 npx expo run:ios
-```
-
-If your project does not yet contain native directories (ios/ and android/), Expo will automatically generate them.
-
-You can also generate them manually using:
-
-```sh
-npx expo prebuild
+npx expo run:android
 ```
 
 ### React Native CLI
 
-For bare React Native projects, you must ensure that you have **[installed and configured the expo package](https://docs.expo.dev/bare/installing-expo-modules/)** before continuing.
-
-After installing the package, install the iOS CocoaPods dependencies:
+Ensure you have [Expo modules configured](https://docs.expo.dev/bare/installing-expo-modules/) in your project, then:
 
 ```sh
-npx pod-install
+# iOS
+cd ios && pod install && cd ..
+npx react-native run-ios
+
+# Android
+npx react-native run-android
 ```
 
-or manually:
+### Config Plugin (recommended)
 
-```sh
-cd ios && pod install
-```
-
-### Android (temporary setup)
-
-The Android implementation currently relies on a local Maven dependency:
-
-```
-implementation("com.openwearables.health:sdk:0.6.0")
-```
-
-To test the Android integration using `mavenLocal`, please refer to the setup instructions in the example app:
-
-👉 **[example/README.md](./example/README.md)**
-
-## Config Plugin (optional)
-
-You can customize the permission messages displayed to users by configuring the plugin in your app.json or app.config.js.
+Add to your `app.json` / `app.config.js`:
 
 ```json
 {
   "expo": {
     "plugins": [
-      [
-        "open-wearables",
-        {
-          "healthShareUsage": "Allow $(PRODUCT_NAME) to read your health data.",
-          "healthUpdateUsage": "Allow $(PRODUCT_NAME) to write health data."
-        }
-      ]
+      ["open-wearables", {
+        "healthShareUsage": "Allow access to your health data.",
+        "healthUpdateUsage": "Allow updates to your health data.",
+        "backgroundDelivery": true
+      }]
     ]
   }
 }
 ```
 
-| **Option**        | **Description**                                              |
-| ----------------- | ------------------------------------------------------------ |
-| healthShareUsage  | Sets the NSHealthShareUsageDescription value in Info.plist.  |
-| healthUpdateUsage | Sets the NSHealthUpdateUsageDescription value in Info.plist. |
+## Android: Health Connect Setup
 
-## Example app
+Add the Health Connect permission queries to your `AndroidManifest.xml`:
 
-A minimal Expo application demonstrating how to integrate the SDK.
+```xml
+<queries>
+  <package android:name="com.google.android.apps.healthdata" />
+</queries>
+```
 
-See the example project:  
-👉 **[example/README.md](./example/README.md)**
+The config plugin automatically adds the required `activity-alias` entries for Health Connect permission UI.
 
-## Usage
+## Quick Start
 
-```ts
-import OpenWearablesHealthSDK from "open-wearables";
+```typescript
+import OpenWearables, { HealthDataType } from 'open-wearables';
 
-// Configure the SDK with your backend host
-OpenWearablesHealthSDK.configure("https://your-api-host.com");
+// 1. Configure
+OpenWearables.configure('https://your-open-wearables-server.com');
 
-// Sign in (token-based)
-OpenWearablesHealthSDK.signIn(userId, accessToken, refreshToken, null);
+// 2. Sign in with SDK token
+await OpenWearables.signIn(userId, accessToken, refreshToken, null);
+// OR with API key:
+await OpenWearables.signIn(userId, null, null, 'your-api-key');
 
-// Or sign in (API key)
-OpenWearablesHealthSDK.signIn(userId, null, null, apiKey);
-
-// Request HealthKit authorization
-await OpenWearablesHealthSDK.requestAuthorization([
-  "steps",
-  "heartRate",
-  "sleep",
+// 3. Request permissions
+const granted = await OpenWearables.requestAuthorization([
+  HealthDataType.Steps,
+  HealthDataType.HeartRate,
+  HealthDataType.Sleep,
+  HealthDataType.ActiveEnergy,
 ]);
 
-// Start background sync
-await OpenWearablesHealthSDK.startBackgroundSync();
+// 4. Start background sync
+await OpenWearables.startBackgroundSync(30); // sync last 30 days on first run
 
-// Sync immediately
-await OpenWearablesHealthSDK.syncNow();
+// 5. Or sync immediately
+await OpenWearables.syncNow();
 ```
 
-## API
+## Events
 
-### Configuration
+```typescript
+import OpenWearables from 'open-wearables';
+import { EventSubscription } from 'expo-modules-core';
 
-#### `configure(host: string): void`
+// Listen for log messages
+const logSub: EventSubscription = OpenWearables.addListener('onLog', ({ message }) => {
+  console.log('[OW]', message);
+});
 
-Sets the backend host URL for the SDK.
+// Listen for auth errors
+const errSub: EventSubscription = OpenWearables.addListener('onAuthError', ({ statusCode, message }) => {
+  console.error('Auth error', statusCode, message);
+  // Re-authenticate here
+});
 
----
-
-### Auth
-
-#### `signIn(userId, accessToken, refreshToken, apiKey): void`
-
-Signs in a user. `accessToken`, `refreshToken`, and `apiKey` are optional.
-
-#### `signOut(): void`
-
-Signs out the current user.
-
-#### `updateTokens(accessToken: string, refreshToken: string): void`
-
-Updates the stored auth tokens.
-
-#### `restoreSession(): Promise<boolean>`
-
-Attempts to restore a previously saved session. Returns `true` if successful.
-
-#### `isSessionValid(): boolean`
-
-Returns whether the current session is valid.
-
----
-
-### HealthKit Authorization
-
-#### `requestAuthorization(types: HealthDataType[]): Promise<boolean>`
-
-Requests HealthKit read permissions for the given data types. Returns `true` if the authorization was granted.
-
-See `[HealthDataType](#healthdatatype)` for the full list of supported types.
-
----
-
-### Sync
-
-#### `startBackgroundSync(): Promise<boolean>`
-
-Starts background health data sync. Returns `true` if started successfully.
-
-#### `stopBackgroundSync(): void`
-
-Stops background sync.
-
-#### `syncNow(): Promise<void>`
-
-Triggers an immediate sync.
-
-#### `resumeSync(): Promise<boolean>`
-
-Resumes a previously paused sync.
-
-#### `isSyncActive(): boolean`
-
-Returns whether background sync is currently active.
-
-#### `getSyncStatus(): Record<string, any>`
-
-Returns the current sync status.
-
-#### `resetAnchors(): void`
-
-Resets the HealthKit query anchors, forcing a full re-sync on the next run.
-
-#### `getStoredCredentials(): Record<string, any>`
-
-Returns the credentials currently stored by the SDK.
-
----
-
-### Events
-
-Subscribe to native SDK events using the standard Expo module event emitter:
-
-```ts
-const subscription = OpenWearablesHealthSDK.addListener(
-  "onLog",
-  ({ message }) => {
-    console.log("SDK log:", message);
-  }
-);
-
-const authSub = OpenWearablesHealthSDK.addListener(
-  "onAuthError",
-  ({ statusCode, message }) => {
-    console.error(`Auth error ${statusCode}:`, message);
-  }
-);
-
-// Clean up
-subscription.remove();
-authSub.remove();
+// Cleanup
+logSub.remove();
+errSub.remove();
 ```
 
-| Event         | Payload                                   | Description                            |
-| ------------- | ----------------------------------------- | -------------------------------------- |
-| `onLog`       | `{ message: string }`                     | Log messages emitted by the native SDK |
-| `onAuthError` | `{ statusCode: number, message: string }` | Authentication errors                  |
+## API Reference
 
----
+### `configure(host, customSyncURL?)`
+Set the Open Wearables server host. Call before anything else.
 
-### HealthDataType
+### `signIn(userId, accessToken, refreshToken, apiKey)`
+Authenticate. Use either token-based auth (`accessToken` + `refreshToken`) or API key auth (`apiKey`).
 
-The following health data type identifiers can be passed to `requestAuthorization`:
+### `signOut()`
+Clear stored credentials and stop sync.
 
-**Activity & Mobility**
-`steps`, `distanceWalkingRunning`, `distanceCycling`, `flightsClimbed`, `walkingSpeed`, `walkingStepLength`, `walkingAsymmetryPercentage`, `walkingDoubleSupportPercentage`, `sixMinuteWalkTestDistance`, `activeEnergy`, `basalEnergy`
+### `requestAuthorization(types: HealthDataType[])`
+Request HealthKit (iOS) or Health Connect (Android) permissions. Returns `true` if granted.
 
-**Heart & Cardiovascular**
-`heartRate`, `restingHeartRate`, `heartRateVariabilitySDNN`, `vo2Max`, `oxygenSaturation`, `respiratoryRate`
+### `startBackgroundSync(syncDaysBack?)`
+Start periodic background sync. On first run, syncs `syncDaysBack` days of history. Returns `true` if started.
 
-**Body Measurements**
-`bodyMass`, `height`, `bmi`, `bodyFatPercentage`, `leanBodyMass`, `waistCircumference`, `bodyTemperature`
+### `stopBackgroundSync()`
+Stop background sync.
 
-**Blood & Metabolic**
-`bloodGlucose`, `insulinDelivery`, `bloodPressureSystolic`, `bloodPressureDiastolic`, `bloodPressure`
+### `syncNow()`
+Trigger an immediate sync.
 
-**Sleep & Mindfulness**
-`sleep`, `mindfulSession`
+### `setSyncInterval(minutes)`
+Set background sync interval (minimum 15 minutes on Android due to WorkManager limits).
 
-**Reproductive Health**
-`menstrualFlow`, `cervicalMucusQuality`, `ovulationTestResult`, `sexualActivity`
+### `isSyncActive(): boolean`
+Check if sync is currently running.
 
-**Nutrition**
-`dietaryEnergyConsumed`, `dietaryCarbohydrates`, `dietaryProtein`, `dietaryFatTotal`, `dietaryWater`
+### `getSyncStatus(): Record<string, any>`
+Get current sync state including last sync time and status per data type.
 
-**Workout**
-`workout`
+### `resumeSync()`
+Resume sync after token refresh or re-authentication.
 
-**Aliases**
-`restingEnergy`, `bloodOxygen`
+### `resetAnchors()`
+Clear all sync anchors — next sync will re-read all historical data.
+
+### `getStoredCredentials(): Record<string, any>`
+Get stored auth credentials (tokens are masked).
+
+### `getAvailableProviders()` (Android only)
+Returns list of available health data providers (Health Connect, Samsung Health).
+
+### `setProvider(providerId)` (Android only)
+Select the active health data provider.
+
+## Supported Health Data Types
+
+```typescript
+import { HealthDataType } from 'open-wearables';
+
+HealthDataType.Steps
+HealthDataType.HeartRate
+HealthDataType.RestingHeartRate
+HealthDataType.HeartRateVariabilitySDNN
+HealthDataType.OxygenSaturation
+HealthDataType.ActiveEnergy
+HealthDataType.BasalEnergy
+HealthDataType.DistanceWalkingRunning
+HealthDataType.DistanceCycling
+HealthDataType.FlightsClimbed
+HealthDataType.BodyMass
+HealthDataType.Height
+HealthDataType.BodyFatPercentage
+HealthDataType.Bmi
+HealthDataType.BloodPressureSystolic
+HealthDataType.BloodPressureDiastolic
+HealthDataType.BloodGlucose
+HealthDataType.RespiratoryRate
+HealthDataType.BodyTemperature
+HealthDataType.Vo2Max
+HealthDataType.Sleep
+HealthDataType.Workout
+// ... and more
+```
+
+## Architecture
+
+```
+React Native / TypeScript
+        │
+        ▼
+Expo Module API (JSI bridge)
+   ┌────┴────┐
+   │         │
+Android     iOS
+  │           │
+Health      HealthKit
+Connect       │
+  │           │
+  └─────┬─────┘
+        │
+  Open Wearables API
+  POST /api/v1/sdk/users/{id}/sync
+```
+
+## Contributing
+
+PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+MIT

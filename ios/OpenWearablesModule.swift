@@ -1,35 +1,55 @@
 import ExpoModulesCore
-import OpenWearablesHealthSDK
+import HealthKit
 
 public class OpenWearablesModule: Module {
+
+    // MARK: - Log level
+
+    private var logLevel: OWLogLevel = .always
+
+    // MARK: - Module Definition
+
     public func definition() -> ModuleDefinition {
         Name("OpenWearablesHealthSDK")
-        
-        // MARK: - Callbacks (Events)        
+
+        // MARK: Events
         Events("onLog", "onAuthError")
-        
-        // MARK: - Lifecycle        
+
+        // MARK: Lifecycle
         OnCreate {
-            OpenWearablesHealthSDK.shared.onLog = { message in
-                self.sendEvent("onLog", [
-                    "message": message
-                ])
+            SyncManager.shared.onLog = { [weak self] message in
+                guard let self = self else { return }
+                self.emitLog(message)
             }
-            
-            OpenWearablesHealthSDK.shared.onAuthError = { statusCode, message in
+            SyncManager.shared.onAuthError = { [weak self] code, message in
+                guard let self = self else { return }
                 self.sendEvent("onAuthError", [
-                    "statusCode": statusCode,
+                    "statusCode": code,
                     "message": message
                 ])
             }
         }
-        
-        // MARK: - Configure        
+
+        // MARK: - Configure
         Function("configure") { (host: String, customSyncURL: String?) in
-            OpenWearablesHealthSDK.shared.configure(host: host)
+            // Persist the host. If credentials already exist, update them in-place.
+            let creds = AuthManager.shared.getCredentials()
+            if let userId = creds.userId, !userId.isEmpty {
+                AuthManager.shared.saveCredentials(
+                    userId: userId,
+                    accessToken: creds.accessToken,
+                    refreshToken: creds.refreshToken,
+                    apiKey: creds.apiKey,
+                    host: host
+                )
+            } else {
+                // No signed-in user yet — just store the host for later use by signIn.
+                AuthManager.shared.saveHost(host)
+            }
+            self.emitLog("Configured with host: \(host)")
         }
-        
-        // MARK: - Auth        
+
+        // MARK: - Auth
         AsyncFunction("signIn") { (
             userId: String,
             accessToken: String?,
@@ -37,98 +57,122 @@ public class OpenWearablesModule: Module {
             apiKey: String?,
             promise: Promise
         ) in
-            OpenWearablesHealthSDK.shared.signIn(
+            let creds = AuthManager.shared.getCredentials()
+            let host = creds.host ?? ""
+            AuthManager.shared.saveCredentials(
                 userId: userId,
                 accessToken: accessToken,
                 refreshToken: refreshToken,
-                apiKey: apiKey
+                apiKey: apiKey,
+                host: host
             )
+            self.emitLog("Signed in userId=\(userId)")
             promise.resolve()
-        }
-        
-        AsyncFunction("signOut") { (promise: Promise) in
-            OpenWearablesHealthSDK.shared.signOut()
-            promise.resolve()
-        }
-        
-        Function("updateTokens") { (accessToken: String, refreshToken: String) in
-            OpenWearablesHealthSDK.shared.updateTokens(
-                accessToken: accessToken,
-                refreshToken: refreshToken
-            )
-        }
-        
-        Function("restoreSession") {
-            return OpenWearablesHealthSDK.shared.restoreSession()
-        }
-        
-        Function("isSessionValid") {
-            return OpenWearablesHealthSDK.shared.isSessionValid
-        }
-        
-        // MARK: - HealthKit Authorization        
-        AsyncFunction("requestAuthorization") { (types: [String], promise: Promise) in
-            let healthTypes = types.compactMap { HealthDataType(rawValue: $0) }
-            OpenWearablesHealthSDK.shared.requestAuthorization(types: healthTypes) { success in
-                promise.resolve(success)
-            }
-        }
-        
-        // MARK: - Sync    
-        Function("setSyncInterval") { (minutes: Double) in } // (not implemented in iOS SDK)
-            
-        AsyncFunction("startBackgroundSync") { (syncDaysBack: Int?, promise: Promise) in
-            OpenWearablesHealthSDK.shared.startBackgroundSync(syncDaysBack: syncDaysBack) { started in
-                promise.resolve(started)
-            }
-        }
-        
-        AsyncFunction("stopBackgroundSync") { (promise: Promise) in
-            OpenWearablesHealthSDK.shared.stopBackgroundSync()
-            promise.resolve()
-        }
-        
-        AsyncFunction("syncNow") { (promise: Promise) in
-            OpenWearablesHealthSDK.shared.syncNow {
-                promise.resolve()
-            }
-        }
-        
-        AsyncFunction("resumeSync") { (promise: Promise) in
-            OpenWearablesHealthSDK.shared.resumeSync { resumed in
-                promise.resolve(resumed)
-            }
-        }
-        
-        Function("isSyncActive") {
-            return OpenWearablesHealthSDK.shared.isSyncActive
-        }
-        
-        Function("getSyncStatus") {
-            return OpenWearablesHealthSDK.shared.getSyncStatus()
-        }
-        
-        Function("resetAnchors") {
-            OpenWearablesHealthSDK.shared.resetAnchors()
-        }
-        
-        Function("getStoredCredentials") {
-            return OpenWearablesHealthSDK.shared.getStoredCredentials()
         }
 
-        // MARK: - Providers (not implemented in iOS SDK)        
-        Function("getAvailableProviders") { return [] }
-        
-        Function("setProvider") { }
+        AsyncFunction("signOut") { (promise: Promise) in
+            await SyncManager.shared.stopBackgroundSync()
+            AuthManager.shared.clearCredentials()
+            self.emitLog("Signed out")
+            promise.resolve()
+        }
+
+        Function("updateTokens") { (accessToken: String, refreshToken: String) in
+            AuthManager.shared.updateTokens(accessToken: accessToken, refreshToken: refreshToken)
+            self.emitLog("Tokens updated")
+        }
+
+        Function("restoreSession") { () -> String in
+            return AuthManager.shared.restoreSession()
+        }
+
+        Function("isSessionValid") { () -> Bool in
+            return AuthManager.shared.isSessionValid()
+        }
+
+        // MARK: - HealthKit Authorization
+        AsyncFunction("requestAuthorization") { (types: [String], promise: Promise) in
+            guard HealthKitManager.shared.isAvailable() else {
+                self.emitLog("HealthKit not available on this device")
+                promise.resolve(false)
+                return
+            }
+            let granted: Bool = await withCheckedContinuation { continuation in
+                HealthKitManager.shared.requestAuthorization(types: types) { success, error in
+                    if let error = error {
+                        self.emitLog("Authorization error: \(error.localizedDescription)")
+                    }
+                    continuation.resume(returning: success)
+                }
+            }
+            self.emitLog("Authorization result: \(granted)")
+            promise.resolve(granted)
+        }
+
+        // MARK: - Sync
+        Function("setSyncInterval") { (_: Double) in
+            // No-op on iOS — kept for API compatibility
+        }
+
+        AsyncFunction("startBackgroundSync") { (syncDaysBack: Int?, promise: Promise) in
+            let started = await SyncManager.shared.startBackgroundSync(syncDaysBack: syncDaysBack)
+            promise.resolve(started)
+        }
+
+        AsyncFunction("stopBackgroundSync") { (promise: Promise) in
+            await SyncManager.shared.stopBackgroundSync()
+            promise.resolve()
+        }
+
+        AsyncFunction("syncNow") { (promise: Promise) in
+            await SyncManager.shared.syncNow()
+            promise.resolve()
+        }
+
+        AsyncFunction("resumeSync") { (promise: Promise) in
+            let resumed = await SyncManager.shared.resumeSync()
+            promise.resolve(resumed)
+        }
+
+        Function("isSyncActive") { () -> Bool in
+            return SyncManager.shared.isSyncActive
+        }
+
+        Function("getSyncStatus") { () -> [String: Any] in
+            return SyncManager.shared.getSyncStatus()
+        }
+
+        Function("resetAnchors") {
+            SyncManager.shared.resetAnchors()
+        }
+
+        Function("getStoredCredentials") { () -> [String: Any] in
+            return AuthManager.shared.getCredentials().toDictionary()
+        }
+
+        // MARK: - Providers (not applicable on iOS)
+        Function("getAvailableProviders") { () -> [Any] in
+            return []
+        }
+
+        Function("setProvider") { (_: String) -> Bool in
+            return false
+        }
 
         // MARK: - Logs
         Function("setLogLevel") { (levelId: Int) in
-            let level = OWLogLevel(rawValue: levelId) ?? .always
-            OpenWearablesHealthSDK.shared.setLogLevel(level)
+            self.logLevel = OWLogLevel(rawValue: levelId) ?? .always
         }
 
-        Function("getLogLevel") {
-            return OpenWearablesHealthSDK.shared.logLevel.rawValue
+        Function("getLogLevel") { () -> Int in
+            return self.logLevel.rawValue
         }
+    }
+
+    // MARK: - Private helpers
+
+    private func emitLog(_ message: String) {
+        guard logLevel != .none else { return }
+        sendEvent("onLog", ["message": message])
     }
 }
